@@ -74,7 +74,34 @@ async def cb_admin(query: CallbackQuery, state: FSMContext) -> None:
     # ── Stats ──────────────────────────────────────────────────────────
     if action == "stats":
         s = db.stats()
-        await query.message.answer(t(lang, "admin_stats_text", **s), parse_mode="HTML")
+        rs = db.revenue_stats()
+        text = (
+            "📊 <b>TO'LIQ STATISTIKA</b>\n\n"
+            "👥 <b>Foydalanuvchilar</b>\n"
+            f"   Bugun: <b>{rs['today_users']}</b> | Jami: <b>{rs['total_users']}</b>\n\n"
+            "📦 <b>Buyurtmalar</b>\n"
+            f"   Bugun: <b>{rs['today_orders']}</b>\n"
+            f"   Bu oy: <b>{rs['month_orders']}</b>\n"
+            f"   Jami: <b>{rs['total_orders']}</b>\n\n"
+            "📋 <b>Holat bo'yicha</b>\n"
+            f"   🆕 Yangi: <b>{rs['new_orders']}</b>\n"
+            f"   🔄 Jarayonda: <b>{rs['active_orders']}</b>\n"
+            f"   ✅ Tayyor: <b>{rs['done_orders']}</b>\n\n"
+            "💰 <b>Daromad</b>\n"
+            f"   Tasdiqlangan: <b>{rs['confirmed_count']}</b> ta\n"
+            f"   Umumiy summa: <b>{rs['confirmed_sum']:,} so'm</b>\n"
+            f"   ⏳ Kutilmoqda: <b>{rs['pending_payments']}</b>\n\n"
+            "🏆 <b>Top xizmat</b>\n"
+            f"   {rs['top_service']} ({rs['top_service_count']} ta buyurtma)"
+        )
+        # Recent orders
+        if rs['recent_orders']:
+            text += "\n\n📋 <b>Oxirgi 5 buyurtma:</b>"
+            for o in rs['recent_orders']:
+                status_map = {'new': '🆕', 'confirmed': '✅', 'in_progress': '🔄', 'done': '✅', 'rejected': '❌'}
+                st = status_map.get(o.get('status',''), '❓')
+                text += f"\n  {st} #{o['id']} — {o.get('svc_name','—')} — {o['name']}"
+        await query.message.answer(text, parse_mode="HTML")
 
     # ── Orders ─────────────────────────────────────────────────────────
     elif action == "orders":

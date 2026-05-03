@@ -315,3 +315,95 @@ def stats() -> dict:
             "payments_ok":      c.execute("SELECT COUNT(*) FROM payments WHERE status='confirmed'").fetchone()[0],
             "payments_pending": c.execute("SELECT COUNT(*) FROM payments WHERE status='checking'").fetchone()[0],
         }
+
+
+def revenue_stats() -> dict:
+    """Kunlik, oylik, umumiy daromad va batafsil statistika."""
+    with _conn() as c:
+        today_orders = c.execute(
+            "SELECT COUNT(*) FROM orders WHERE created_at LIKE ?",
+            (datetime.utcnow().strftime('%Y-%m-%d') + '%',)
+        ).fetchone()[0]
+
+        month_orders = c.execute(
+            "SELECT COUNT(*) FROM orders WHERE created_at LIKE ?",
+            (datetime.utcnow().strftime('%Y-%m') + '%',)
+        ).fetchone()[0]
+
+        total_orders = c.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+
+        confirmed_payments = c.execute(
+            "SELECT COUNT(*), COALESCE(SUM(CAST(REPLACE(REPLACE(amount,' ',''),',','') AS INTEGER)),0) "
+            "FROM payments WHERE status='confirmed'"
+        ).fetchone()
+
+        pending_payments = c.execute(
+            "SELECT COUNT(*) FROM payments WHERE status IN ('pending','checking')"
+        ).fetchone()[0]
+
+        today_users = c.execute(
+            "SELECT COUNT(*) FROM users WHERE created_at LIKE ?",
+            (datetime.utcnow().strftime('%Y-%m-%d') + '%',)
+        ).fetchone()[0]
+
+        total_users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+        # Top service
+        top_svc = c.execute(
+            "SELECT s.name, COUNT(o.id) as cnt FROM orders o "
+            "LEFT JOIN services s ON o.service_id=s.id "
+            "GROUP BY o.service_id ORDER BY cnt DESC LIMIT 1"
+        ).fetchone()
+
+        # Recent 5 orders
+        recent = c.execute(
+            "SELECT o.*, s.name as svc_name FROM orders o "
+            "LEFT JOIN services s ON o.service_id=s.id "
+            "ORDER BY o.id DESC LIMIT 5"
+        ).fetchall()
+
+        # Orders by status
+        new_orders = c.execute("SELECT COUNT(*) FROM orders WHERE status='new'").fetchone()[0]
+        active_orders = c.execute("SELECT COUNT(*) FROM orders WHERE status IN ('confirmed','in_progress')").fetchone()[0]
+        done_orders = c.execute("SELECT COUNT(*) FROM orders WHERE status='done'").fetchone()[0]
+
+        return {
+            "today_orders": today_orders,
+            "month_orders": month_orders,
+            "total_orders": total_orders,
+            "confirmed_count": confirmed_payments[0],
+            "confirmed_sum": confirmed_payments[1],
+            "pending_payments": pending_payments,
+            "today_users": today_users,
+            "total_users": total_users,
+            "top_service": top_svc["name"] if top_svc else "—",
+            "top_service_count": top_svc["cnt"] if top_svc else 0,
+            "recent_orders": [dict(r) for r in recent],
+            "new_orders": new_orders,
+            "active_orders": active_orders,
+            "done_orders": done_orders,
+        }
+
+
+def all_orders_data() -> list:
+    """Barcha buyurtmalar to'liq ma'lumot bilan."""
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT o.*, s.name as svc_name, u.username, u.full_name as user_fullname "
+            "FROM orders o "
+            "LEFT JOIN services s ON o.service_id=s.id "
+            "LEFT JOIN users u ON o.user_id=u.user_id "
+            "ORDER BY o.id DESC"
+        ).fetchall()]
+
+
+def all_clients_data() -> list:
+    """Barcha mijozlar to'liq ma'lumot bilan."""
+    with _conn() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT u.*, "
+            "  (SELECT COUNT(*) FROM orders o WHERE o.user_id=u.user_id) as orders_count, "
+            "  (SELECT MAX(created_at) FROM orders o WHERE o.user_id=u.user_id) as last_order "
+            "FROM users u ORDER BY u.created_at DESC"
+        ).fetchall()]
+
