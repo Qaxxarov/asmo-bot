@@ -1,10 +1,9 @@
-"""SQLite data layer — users, services, orders, payments, requests."""
+"""SQLite — users, services, orders, payments."""
 
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Optional
-
 from .config import DB_PATH, logger
 
 
@@ -24,6 +23,10 @@ def _conn():
         conn.close()
 
 
+def _now() -> str:
+    return datetime.utcnow().isoformat(sep=" ", timespec="seconds")
+
+
 def init_db() -> None:
     with _conn() as c:
         c.executescript("""
@@ -32,9 +35,9 @@ def init_db() -> None:
                 username   TEXT,
                 full_name  TEXT,
                 language   TEXT DEFAULT 'uz',
+                source     TEXT DEFAULT 'direct',
                 created_at TEXT NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS services (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 name        TEXT NOT NULL,
@@ -44,18 +47,18 @@ def init_db() -> None:
                 active      INTEGER DEFAULT 1,
                 created_at  TEXT NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS orders (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id    INTEGER NOT NULL,
-                service_id INTEGER,
-                name       TEXT NOT NULL,
-                contact    TEXT NOT NULL,
-                details    TEXT,
-                status     TEXT NOT NULL DEFAULT 'new',
-                created_at TEXT NOT NULL
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id      INTEGER NOT NULL,
+                service_id   INTEGER,
+                name         TEXT NOT NULL,
+                contact      TEXT NOT NULL,
+                details      TEXT,
+                status       TEXT NOT NULL DEFAULT 'new',
+                agreed_price TEXT,
+                deadline     TEXT,
+                created_at   TEXT NOT NULL
             );
-
             CREATE TABLE IF NOT EXISTS payments (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
                 order_id        INTEGER NOT NULL,
@@ -65,146 +68,79 @@ def init_db() -> None:
                 status          TEXT NOT NULL DEFAULT 'pending',
                 created_at      TEXT NOT NULL
             );
-
-            CREATE TABLE IF NOT EXISTS client_requests (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id     INTEGER NOT NULL,
-                type        TEXT NOT NULL,
-                summary     TEXT,
-                order_id    INTEGER,
-                status      TEXT NOT NULL DEFAULT 'open',
-                created_at  TEXT NOT NULL,
-                resolved_at TEXT
-            );
         """)
-
-        # Seed default services if empty
         cur = c.execute("SELECT COUNT(*) AS n FROM services")
         if cur.fetchone()["n"] == 0:
             now = _now()
             seeds = [
-                ("🤖 AI Avatar Video",
-                 "AI texnologiyalari yordamida professional avatar videolar yaratish.",
-                 "Narx kelishiladi", "video", now),
-                ("📺 Reklama Videosi",
-                 "30-60 soniyali professional brend reklama videolari.",
-                 "Narx kelishiladi", "video", now),
-                ("🎬 Intro & Outro",
-                 "YouTube va social media uchun professional intro va outro.",
-                 "Narx kelishiladi", "video", now),
-                ("📸 Foto Tayyorlash",
-                 "AI yordamida foto sifatini yaxshilash va background o'zgartirish.",
-                 "Narx kelishiladi", "image", now),
-                ("✂ Video Tahrirlash",
-                 "Professional montaj, color grading va effektlar.",
-                 "Narx kelishiladi", "video", now),
-                ("🎨 Dizayn & Motion",
-                 "Social media uchun dinamik grafika va motion graphics.",
-                 "Narx kelishiladi", "image", now),
+                ("🤖 AI Avatar Video", "AI texnologiyalari yordamida professional avatar videolar.", "Narx kelishiladi", "video", now),
+                ("📺 Reklama Videosi", "30-60 soniyali professional brend reklama videolari.", "Narx kelishiladi", "video", now),
+                ("🎬 Intro & Outro", "YouTube va social media uchun professional intro va outro.", "Narx kelishiladi", "video", now),
+                ("📸 Foto Tayyorlash", "AI yordamida foto sifatini yaxshilash va background o'zgartirish.", "Narx kelishiladi", "image", now),
+                ("✂ Video Tahrirlash", "Professional montaj, color grading va effektlar.", "Narx kelishiladi", "video", now),
+                ("🎨 Dizayn & Motion", "Social media uchun dinamik grafika va motion graphics.", "Narx kelishiladi", "image", now),
             ]
-            c.executemany(
-                "INSERT INTO services (name,description,price,category,created_at) VALUES (?,?,?,?,?)",
-                seeds,
-            )
+            c.executemany("INSERT INTO services (name,description,price,category,created_at) VALUES (?,?,?,?,?)", seeds)
         logger.info("DB ready: %s", DB_PATH)
 
 
-def _now() -> str:
-    return datetime.utcnow().isoformat(sep=" ", timespec="seconds")
-
-
 # ── Users ──────────────────────────────────────────────────────────────────
-
-def upsert_user(user_id: int, username: Optional[str], full_name: str) -> None:
+def upsert_user(user_id: int, username: Optional[str], full_name: str, source: str = "direct") -> None:
     with _conn() as c:
         c.execute(
-            """INSERT INTO users (user_id,username,full_name,created_at)
-               VALUES (?,?,?,?)
-               ON CONFLICT(user_id) DO UPDATE SET
-                 username=excluded.username, full_name=excluded.full_name""",
-            (user_id, username, full_name, _now()),
-        )
-
-
-def set_language(user_id: int, lang: str) -> None:
-    with _conn() as c:
-        c.execute("UPDATE users SET language=? WHERE user_id=?", (lang, user_id))
-
+            "INSERT INTO users (user_id,username,full_name,source,created_at) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, full_name=excluded.full_name",
+            (user_id, username, full_name, source, _now()))
 
 def get_language(user_id: int) -> str:
     with _conn() as c:
         row = c.execute("SELECT language FROM users WHERE user_id=?", (user_id,)).fetchone()
         return (row["language"] or "uz") if row else "uz"
 
+def set_language(user_id: int, lang: str) -> None:
+    with _conn() as c:
+        c.execute("UPDATE users SET language=? WHERE user_id=?", (lang, user_id))
 
 def get_user(user_id: int):
     with _conn() as c:
         return c.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
-
 
 def all_user_ids() -> list:
     with _conn() as c:
         return [r["user_id"] for r in c.execute("SELECT user_id FROM users")]
 
 
-def list_clients() -> list:
-    with _conn() as c:
-        return c.execute("""
-            SELECT u.*,
-              (SELECT COUNT(*) FROM orders o WHERE o.user_id=u.user_id) AS orders_count,
-              (SELECT COUNT(*) FROM client_requests r
-               WHERE r.user_id=u.user_id AND r.status='open') AS open_count
-            FROM users u
-            WHERE EXISTS(SELECT 1 FROM orders o WHERE o.user_id=u.user_id)
-               OR EXISTS(SELECT 1 FROM client_requests r WHERE r.user_id=u.user_id)
-            ORDER BY open_count DESC, u.user_id DESC
-        """).fetchall()
-
-
 # ── Services ───────────────────────────────────────────────────────────────
-
 def list_services() -> list:
     with _conn() as c:
         return c.execute("SELECT * FROM services WHERE active=1 ORDER BY id").fetchall()
-
 
 def get_service(sid: int):
     with _conn() as c:
         return c.execute("SELECT * FROM services WHERE id=?", (sid,)).fetchone()
 
-
 def add_service(name: str, description: str, price: str, category: str = "general") -> int:
     with _conn() as c:
-        cur = c.execute(
-            "INSERT INTO services (name,description,price,category,created_at) VALUES (?,?,?,?,?)",
-            (name, description, price, category, _now()),
-        )
+        cur = c.execute("INSERT INTO services (name,description,price,category,created_at) VALUES (?,?,?,?,?)",
+                        (name, description, price, category, _now()))
         return cur.lastrowid
-
 
 def delete_service(sid: int) -> bool:
     with _conn() as c:
-        cur = c.execute("UPDATE services SET active=0 WHERE id=?", (sid,))
-        return cur.rowcount > 0
+        return c.execute("UPDATE services SET active=0 WHERE id=?", (sid,)).rowcount > 0
 
 
 # ── Orders ─────────────────────────────────────────────────────────────────
-
-def create_order(user_id: int, service_id: Optional[int],
-                 name: str, contact: str, details: str) -> int:
+def create_order(user_id: int, service_id: Optional[int], name: str, contact: str, details: str) -> int:
     with _conn() as c:
         cur = c.execute(
-            "INSERT INTO orders (user_id,service_id,name,contact,details,status,created_at) "
-            "VALUES (?,?,?,?,?,'new',?)",
-            (user_id, service_id, name, contact, details, _now()),
-        )
+            "INSERT INTO orders (user_id,service_id,name,contact,details,status,created_at) VALUES (?,?,?,?,?,'new',?)",
+            (user_id, service_id, name, contact, details, _now()))
         return cur.lastrowid
-
 
 def get_order(order_id: int):
     with _conn() as c:
         return c.execute("SELECT * FROM orders WHERE id=?", (order_id,)).fetchone()
-
 
 def update_order_status(order_id: int, status: str) -> Optional[int]:
     with _conn() as c:
@@ -212,37 +148,29 @@ def update_order_status(order_id: int, status: str) -> Optional[int]:
         row = c.execute("SELECT user_id FROM orders WHERE id=?", (order_id,)).fetchone()
         return row["user_id"] if row else None
 
+def update_order_price_deadline(order_id: int, price: str, deadline: str) -> None:
+    with _conn() as c:
+        c.execute("UPDATE orders SET agreed_price=?, deadline=? WHERE id=?", (price, deadline, order_id))
 
 def list_orders(limit: int = 20) -> list:
     with _conn() as c:
-        return c.execute("SELECT * FROM orders ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-
+        return [dict(r) for r in c.execute("SELECT * FROM orders ORDER BY id DESC LIMIT ?", (limit,)).fetchall()]
 
 def get_user_orders(user_id: int) -> list:
     with _conn() as c:
-        return c.execute(
-            "SELECT * FROM orders WHERE user_id=? ORDER BY id DESC", (user_id,)
-        ).fetchall()
+        return [dict(r) for r in c.execute("SELECT * FROM orders WHERE user_id=? ORDER BY id DESC", (user_id,)).fetchall()]
 
 
 # ── Payments ───────────────────────────────────────────────────────────────
-
 def create_payment(order_id: int, user_id: int, amount: str) -> int:
     with _conn() as c:
-        cur = c.execute(
-            "INSERT INTO payments (order_id,user_id,amount,status,created_at) VALUES (?,?,?,'pending',?)",
-            (order_id, user_id, amount, _now()),
-        )
+        cur = c.execute("INSERT INTO payments (order_id,user_id,amount,status,created_at) VALUES (?,?,?,'pending',?)",
+                        (order_id, user_id, amount, _now()))
         return cur.lastrowid
-
 
 def set_payment_receipt(payment_id: int, file_id: str) -> None:
     with _conn() as c:
-        c.execute(
-            "UPDATE payments SET receipt_file_id=?, status='checking' WHERE id=?",
-            (file_id, payment_id),
-        )
-
+        c.execute("UPDATE payments SET receipt_file_id=?, status='checking' WHERE id=?", (file_id, payment_id))
 
 def update_payment_status(payment_id: int, status: str) -> Optional[int]:
     with _conn() as c:
@@ -250,160 +178,39 @@ def update_payment_status(payment_id: int, status: str) -> Optional[int]:
         row = c.execute("SELECT user_id FROM payments WHERE id=?", (payment_id,)).fetchone()
         return row["user_id"] if row else None
 
-
 def get_payment(payment_id: int):
     with _conn() as c:
         return c.execute("SELECT * FROM payments WHERE id=?", (payment_id,)).fetchone()
 
 
-def get_order_payment(order_id: int):
-    with _conn() as c:
-        return c.execute(
-            "SELECT * FROM payments WHERE order_id=? ORDER BY id DESC LIMIT 1", (order_id,)
-        ).fetchone()
-
-
-# ── Requests ───────────────────────────────────────────────────────────────
-
-def add_request(user_id: int, type_: str,
-                summary: str = "", order_id: Optional[int] = None) -> int:
-    with _conn() as c:
-        cur = c.execute(
-            "INSERT INTO client_requests (user_id,type,summary,order_id,status,created_at) "
-            "VALUES (?,?,?,?,'open',?)",
-            (user_id, type_, summary, order_id, _now()),
-        )
-        return cur.lastrowid
-
-
-def set_request_status(req_id: int, status: str) -> Optional[int]:
-    with _conn() as c:
-        resolved = _now() if status == "resolved" else None
-        c.execute(
-            "UPDATE client_requests SET status=?,resolved_at=? WHERE id=?",
-            (status, resolved, req_id),
-        )
-        row = c.execute("SELECT user_id FROM client_requests WHERE id=?", (req_id,)).fetchone()
-        return row["user_id"] if row else None
-
-
-def resolve_user_open_requests(user_id: int) -> int:
-    with _conn() as c:
-        cur = c.execute(
-            "UPDATE client_requests SET status='resolved',resolved_at=? "
-            "WHERE user_id=? AND status='open'",
-            (_now(), user_id),
-        )
-        return cur.rowcount
-
-
-def get_user_requests(user_id: int) -> list:
-    with _conn() as c:
-        return c.execute(
-            "SELECT * FROM client_requests WHERE user_id=? ORDER BY id DESC", (user_id,)
-        ).fetchall()
-
-
 # ── Stats ──────────────────────────────────────────────────────────────────
-
 def stats() -> dict:
     with _conn() as c:
+        today = datetime.utcnow().strftime('%Y-%m-%d')
+        month = datetime.utcnow().strftime('%Y-%m')
         return {
-            "users":            c.execute("SELECT COUNT(*) FROM users").fetchone()[0],
-            "orders":           c.execute("SELECT COUNT(*) FROM orders").fetchone()[0],
-            "services":         c.execute("SELECT COUNT(*) FROM services WHERE active=1").fetchone()[0],
-            "payments_ok":      c.execute("SELECT COUNT(*) FROM payments WHERE status='confirmed'").fetchone()[0],
-            "payments_pending": c.execute("SELECT COUNT(*) FROM payments WHERE status='checking'").fetchone()[0],
+            "total_users":    c.execute("SELECT COUNT(*) FROM users").fetchone()[0],
+            "today_users":    c.execute("SELECT COUNT(*) FROM users WHERE created_at LIKE ?", (today+'%',)).fetchone()[0],
+            "total_orders":   c.execute("SELECT COUNT(*) FROM orders").fetchone()[0],
+            "today_orders":   c.execute("SELECT COUNT(*) FROM orders WHERE created_at LIKE ?", (today+'%',)).fetchone()[0],
+            "month_orders":   c.execute("SELECT COUNT(*) FROM orders WHERE created_at LIKE ?", (month+'%',)).fetchone()[0],
+            "new_orders":     c.execute("SELECT COUNT(*) FROM orders WHERE status='new'").fetchone()[0],
+            "active_orders":  c.execute("SELECT COUNT(*) FROM orders WHERE status IN ('confirmed','in_progress')").fetchone()[0],
+            "done_orders":    c.execute("SELECT COUNT(*) FROM orders WHERE status='done'").fetchone()[0],
+            "confirmed_payments": c.execute("SELECT COUNT(*) FROM payments WHERE status='confirmed'").fetchone()[0],
+            "pending_payments":   c.execute("SELECT COUNT(*) FROM payments WHERE status IN ('pending','checking')").fetchone()[0],
         }
-
-
-def revenue_stats() -> dict:
-    """Kunlik, oylik, umumiy daromad va batafsil statistika."""
-    with _conn() as c:
-        today_orders = c.execute(
-            "SELECT COUNT(*) FROM orders WHERE created_at LIKE ?",
-            (datetime.utcnow().strftime('%Y-%m-%d') + '%',)
-        ).fetchone()[0]
-
-        month_orders = c.execute(
-            "SELECT COUNT(*) FROM orders WHERE created_at LIKE ?",
-            (datetime.utcnow().strftime('%Y-%m') + '%',)
-        ).fetchone()[0]
-
-        total_orders = c.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
-
-        confirmed_payments = c.execute(
-            "SELECT COUNT(*), COALESCE(SUM(CAST(REPLACE(REPLACE(amount,' ',''),',','') AS INTEGER)),0) "
-            "FROM payments WHERE status='confirmed'"
-        ).fetchone()
-
-        pending_payments = c.execute(
-            "SELECT COUNT(*) FROM payments WHERE status IN ('pending','checking')"
-        ).fetchone()[0]
-
-        today_users = c.execute(
-            "SELECT COUNT(*) FROM users WHERE created_at LIKE ?",
-            (datetime.utcnow().strftime('%Y-%m-%d') + '%',)
-        ).fetchone()[0]
-
-        total_users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-
-        # Top service
-        top_svc = c.execute(
-            "SELECT s.name, COUNT(o.id) as cnt FROM orders o "
-            "LEFT JOIN services s ON o.service_id=s.id "
-            "GROUP BY o.service_id ORDER BY cnt DESC LIMIT 1"
-        ).fetchone()
-
-        # Recent 5 orders
-        recent = c.execute(
-            "SELECT o.*, s.name as svc_name FROM orders o "
-            "LEFT JOIN services s ON o.service_id=s.id "
-            "ORDER BY o.id DESC LIMIT 5"
-        ).fetchall()
-
-        # Orders by status
-        new_orders = c.execute("SELECT COUNT(*) FROM orders WHERE status='new'").fetchone()[0]
-        active_orders = c.execute("SELECT COUNT(*) FROM orders WHERE status IN ('confirmed','in_progress')").fetchone()[0]
-        done_orders = c.execute("SELECT COUNT(*) FROM orders WHERE status='done'").fetchone()[0]
-
-        return {
-            "today_orders": today_orders,
-            "month_orders": month_orders,
-            "total_orders": total_orders,
-            "confirmed_count": confirmed_payments[0],
-            "confirmed_sum": confirmed_payments[1],
-            "pending_payments": pending_payments,
-            "today_users": today_users,
-            "total_users": total_users,
-            "top_service": top_svc["name"] if top_svc else "—",
-            "top_service_count": top_svc["cnt"] if top_svc else 0,
-            "recent_orders": [dict(r) for r in recent],
-            "new_orders": new_orders,
-            "active_orders": active_orders,
-            "done_orders": done_orders,
-        }
-
 
 def all_orders_data() -> list:
-    """Barcha buyurtmalar to'liq ma'lumot bilan."""
     with _conn() as c:
         return [dict(r) for r in c.execute(
             "SELECT o.*, s.name as svc_name, u.username, u.full_name as user_fullname "
-            "FROM orders o "
-            "LEFT JOIN services s ON o.service_id=s.id "
-            "LEFT JOIN users u ON o.user_id=u.user_id "
-            "ORDER BY o.id DESC"
-        ).fetchall()]
-
+            "FROM orders o LEFT JOIN services s ON o.service_id=s.id "
+            "LEFT JOIN users u ON o.user_id=u.user_id ORDER BY o.id DESC").fetchall()]
 
 def all_clients_data() -> list:
-    """Barcha mijozlar to'liq ma'lumot bilan."""
     with _conn() as c:
         return [dict(r) for r in c.execute(
-            "SELECT u.*, "
-            "  (SELECT COUNT(*) FROM orders o WHERE o.user_id=u.user_id) as orders_count, "
-            "  (SELECT MAX(created_at) FROM orders o WHERE o.user_id=u.user_id) as last_order "
-            "FROM users u ORDER BY u.created_at DESC"
-        ).fetchall()]
-
+            "SELECT u.*, (SELECT COUNT(*) FROM orders o WHERE o.user_id=u.user_id) as orders_count, "
+            "(SELECT MAX(created_at) FROM orders o WHERE o.user_id=u.user_id) as last_order "
+            "FROM users u ORDER BY u.created_at DESC").fetchall()]

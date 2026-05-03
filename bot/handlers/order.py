@@ -1,225 +1,199 @@
-"""Order FSM — name → contact → details → saved → payment."""
+"""Order FSM — name → contact → details → saved. Payment only after admin sets price."""
 
 from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message,
-)
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .. import database as db
-from ..config import ADMIN_ID, logger
-from ..keyboards import cancel_kb, main_menu_kb, order_review_kb, payment_kb
-from ..locales import TEXTS, t
+from ..config import ADMIN_ID, PAYMENT_CARD, PAYMENT_CARD_OWNER, logger
+from ..keyboards import main_menu_kb, cancel_kb, payment_confirm_kb
 
 router = Router(name="order")
 
 
 class OrderStates(StatesGroup):
-    name    = State()
-    contact = State()
-    details = State()
+    name = State(); contact = State(); details = State()
+
+class AdminPriceState(StatesGroup):
+    price = State(); deadline = State()
 
 
-def _lang(uid: int) -> str:
-    return db.get_language(uid)
-
-
-def _cancel_match():
-    return F.text.in_({TEXTS[l]["btn_cancel"] for l in TEXTS})
-
-
-def _menu_order_match():
-    return F.text.in_({TEXTS[l]["menu_order"] for l in TEXTS})
-
-
-# ── Cancel (works from any FSM state) ─────────────────────────────────────
-
-@router.message(_cancel_match())
-async def cancel_any(message: Message, state: FSMContext) -> None:
-    uid = message.from_user.id if message.from_user else 0
-    lang = _lang(uid)
+# ── Cancel ─────────────────────────────────────────────────────────────────
+@router.message(F.text == "❌ Bekor qilish")
+async def cancel(message: Message, state: FSMContext) -> None:
     await state.clear()
-    await message.answer(t(lang, "cancel"), reply_markup=main_menu_kb(lang))
+    await message.answer("❌ Bekor qilindi.", reply_markup=main_menu_kb())
 
 
-# ── Start order from service detail ───────────────────────────────────────
-
+# ── Start order ────────────────────────────────────────────────────────────
 @router.callback_query(F.data.startswith("order:"))
-async def cb_order_start(query: CallbackQuery, state: FSMContext) -> None:
-    if not query.data or not query.from_user or not query.message:
-        return
-    try:
-        sid = int(query.data.split(":", 1)[1])
-    except ValueError:
-        await query.answer()
-        return
-
+async def cb_order(query: CallbackQuery, state: FSMContext) -> None:
+    if not query.data or not query.from_user: return
+    try: sid = int(query.data.split(":")[1])
+    except: await query.answer(); return
     svc = db.get_service(sid)
-    lang = _lang(query.from_user.id)
-    if not svc:
-        await query.answer(t(lang, "order_no_service"), show_alert=True)
-        return
-
-    await state.update_data(service_id=sid, service_name=svc["name"], service_price=svc["price"])
+    if not svc: await query.answer("Xizmat topilmadi", show_alert=True); return
+    await state.update_data(service_id=sid, service_name=svc["name"])
     await state.set_state(OrderStates.name)
-    await query.message.answer(t(lang, "order_intro"), reply_markup=cancel_kb(lang), parse_mode="HTML")
+    await query.message.answer("📝 <b>Buyurtma berish</b>\n\nAvval <b>ismingizni</b> yozing:", reply_markup=cancel_kb(), parse_mode="HTML")
     await query.answer()
 
 
-# ── Start order from "Buyurtma" menu button ───────────────────────────────
-
-@router.message(_menu_order_match())
-async def menu_order(message: Message, state: FSMContext) -> None:
-    if not message.from_user:
-        return
-    lang = _lang(message.from_user.id)
-    services = db.list_services()
-    if not services:
-        await message.answer(t(lang, "services_empty"))
-        return
-    # Show services list to pick from
+@router.message(F.text == "🛒 Buyurtma")
+async def menu_order(message: Message) -> None:
+    svcs = db.list_services()
+    if not svcs: await message.answer("Xizmatlar yo'q."); return
     from ..keyboards import services_kb
-    await message.answer(
-        t(lang, "services_title"),
-        reply_markup=services_kb(services, lang),
-        parse_mode="HTML",
-    )
+    await message.answer("🛠 Xizmat tanlang:", reply_markup=services_kb(svcs), parse_mode="HTML")
 
 
-# ── Step 1: Name ───────────────────────────────────────────────────────────
-
+# ── Steps ──────────────────────────────────────────────────────────────────
 @router.message(OrderStates.name)
 async def step_name(message: Message, state: FSMContext) -> None:
-    if not message.from_user:
-        return
-    lang = _lang(message.from_user.id)
     name = (message.text or "").strip()
-    if not name:
-        return
+    if not name or len(name) < 2: await message.answer("⚠️ Ismingizni yozing:"); return
     await state.update_data(name=name)
     await state.set_state(OrderStates.contact)
-    await message.answer(t(lang, "order_ask_contact", name=name),
-                         reply_markup=cancel_kb(lang), parse_mode="HTML")
-
-
-# ── Step 2: Contact ────────────────────────────────────────────────────────
+    await message.answer(f"Rahmat, <b>{name}</b> ✅\n\n<b>Telefon</b> yoki <b>username</b>ingizni yuboring:", reply_markup=cancel_kb(), parse_mode="HTML")
 
 @router.message(OrderStates.contact)
 async def step_contact(message: Message, state: FSMContext) -> None:
-    if not message.from_user:
-        return
-    lang = _lang(message.from_user.id)
     contact = (message.text or "").strip()
-    if not contact:
-        return
+    if not contact: await message.answer("⚠️ Kontakt yozing:"); return
     await state.update_data(contact=contact)
     await state.set_state(OrderStates.details)
-    await message.answer(t(lang, "order_ask_details"),
-                         reply_markup=cancel_kb(lang), parse_mode="HTML")
-
-
-# ── Step 3: Details → save & notify ───────────────────────────────────────
+    await message.answer("Zo'r! <b>Buyurtma tafsilotlarini</b> yozing:\n— Nima kerak?\n— Qanday uslubda?", reply_markup=cancel_kb(), parse_mode="HTML")
 
 @router.message(OrderStates.details)
 async def step_details(message: Message, state: FSMContext, bot: Bot) -> None:
-    if not message.from_user:
-        return
-    lang = _lang(message.from_user.id)
+    if not message.from_user: return
     details = (message.text or "").strip()
     data = await state.get_data()
-
-    order_id = db.create_order(
-        user_id    = message.from_user.id,
-        service_id = data.get("service_id"),
-        name       = data.get("name", ""),
-        contact    = data.get("contact", ""),
-        details    = details,
-    )
-    db.add_request(
-        message.from_user.id,
-        "order",
-        summary=f"{data.get('service_name','—')}: {details[:200]}",
-        order_id=order_id,
-    )
-
-    # Keep order_id + price in state for payment flow
+    order_id = db.create_order(message.from_user.id, data.get("service_id"), data.get("name",""), data.get("contact",""), details)
     await state.clear()
-    await state.update_data(order_id=order_id, service_price=data.get("service_price","—"))
 
-    # Confirm to user + show payment options
     await message.answer(
-        t(lang, "order_saved", order_id=order_id),
-        reply_markup=main_menu_kb(lang),
-        parse_mode="HTML",
-    )
-    await message.answer(
-        t(lang, "payment_info", price=data.get("service_price", "—")),
-        reply_markup=payment_kb(lang),
-        parse_mode="HTML",
-    )
+        f"✅ <b>Buyurtma qabul qilindi!</b>\n\n"
+        f"📦 Raqam: <b>#{order_id}</b>\n\n"
+        f"Admin buyurtmangizni ko'rib chiqadi va narx + muddatni belgilaydi.\n"
+        f"📦 «Zakazlarim» tugmasidan kuzatib boring. 🙏",
+        reply_markup=main_menu_kb(), parse_mode="HTML")
 
-    # Notify admin
     if ADMIN_ID:
-        admin_text = t(
-            "uz", "admin_new_order",
-            order_id = order_id,
-            name     = data.get("name", ""),
-            contact  = data.get("contact", ""),
-            service  = data.get("service_name", "—"),
-            price    = data.get("service_price", "—"),
-            details  = details[:300],
-            user_id  = message.from_user.id,
-        )
-        # Append reply + open-chat buttons to order review kb
-        base_rows = order_review_kb(order_id, "uz").inline_keyboard
-        extra_row = [
-            InlineKeyboardButton(text="✍️ Javob", callback_data=f"adm:reply:{message.from_user.id}"),
-            InlineKeyboardButton(text="💬 Chat",  url=f"tg://user?id={message.from_user.id}"),
-        ]
-        kb = InlineKeyboardMarkup(inline_keyboard=base_rows + [extra_row])
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Qabul + Narx", callback_data=f"ord:setprice:{order_id}"),
+             InlineKeyboardButton(text="❌ Rad", callback_data=f"ord:reject:{order_id}")],
+            [InlineKeyboardButton(text="💬 Chat", url=f"tg://user?id={message.from_user.id}")],
+        ])
         try:
-            await bot.send_message(ADMIN_ID, admin_text, reply_markup=kb, parse_mode="HTML")
-            logger.info("Admin notified: new order=%s user=%s", order_id, message.from_user.id)
-        except Exception as exc:
-            logger.error("Failed to notify admin about order %s: %s", order_id, exc)
+            await bot.send_message(ADMIN_ID,
+                f"🆕 <b>Yangi buyurtma #{order_id}!</b>\n\n"
+                f"👤 {data.get('name','—')}\n📞 {data.get('contact','—')}\n"
+                f"🧠 <b>{data.get('service_name','—')}</b>\n📝 {details[:300]}\n"
+                f"🆔 <code>{message.from_user.id}</code>",
+                reply_markup=kb, parse_mode="HTML")
+        except Exception as e: logger.error("Admin notify failed: %s", e)
 
 
-# ── Admin order approve/reject ─────────────────────────────────────────────
+# ── Admin: Set price + deadline ────────────────────────────────────────────
+@router.callback_query(F.data.startswith("ord:setprice:"))
+async def cb_setprice(query: CallbackQuery, state: FSMContext) -> None:
+    if not query.from_user or query.from_user.id != ADMIN_ID: await query.answer(); return
+    oid = int(query.data.split(":")[2])
+    await state.set_state(AdminPriceState.price)
+    await state.update_data(admin_order_id=oid)
+    await query.message.answer(f"💰 Buyurtma <b>#{oid}</b> uchun <b>narxni</b> yozing:\n<i>Misol: 200 000 so'm</i>", parse_mode="HTML")
+    try: await query.message.edit_reply_markup(reply_markup=None)
+    except: pass
+    await query.answer()
 
-@router.callback_query(F.data.startswith("ord:"))
-async def cb_order_decision(query: CallbackQuery, bot: Bot) -> None:
-    if not query.data or not query.from_user:
-        return
-    if query.from_user.id != ADMIN_ID:
-        await query.answer()
-        return
+@router.message(AdminPriceState.price)
+async def admin_price(message: Message, state: FSMContext) -> None:
+    if not message.from_user or message.from_user.id != ADMIN_ID: return
+    price = (message.text or "").strip()
+    if not price: await message.answer("❗ Narxni yozing:"); return
+    await state.update_data(admin_price=price)
+    await state.set_state(AdminPriceState.deadline)
+    await message.answer("⏰ Endi <b>muddatni</b> yozing:\n<i>Misol: 3 kun, 1 hafta</i>", parse_mode="HTML")
 
-    parts = query.data.split(":")
-    if len(parts) != 3:
-        await query.answer()
-        return
-    _, action, oid_str = parts
-    try:
-        order_id = int(oid_str)
-    except ValueError:
-        await query.answer()
-        return
+@router.message(AdminPriceState.deadline)
+async def admin_deadline(message: Message, state: FSMContext, bot: Bot) -> None:
+    if not message.from_user or message.from_user.id != ADMIN_ID: return
+    deadline = (message.text or "").strip()
+    if not deadline: await message.answer("❗ Muddatni yozing:"); return
+    data = await state.get_data()
+    oid, price = data.get("admin_order_id"), data.get("admin_price", "—")
+    await state.clear()
+    if not oid: await message.answer("❗ Buyurtma topilmadi."); return
 
-    status  = "approved" if action == "approve" else "rejected"
-    user_id = db.update_order_status(order_id, status)
+    db.update_order_price_deadline(oid, price, deadline)
+    db.update_order_status(oid, "confirmed")
+    await message.answer(f"✅ Buyurtma <b>#{oid}</b> tasdiqlandi!\n💰 {price}\n⏰ {deadline}", reply_markup=main_menu_kb(), parse_mode="HTML")
 
-    if user_id:
-        user_lang = db.get_language(user_id)
-        msg_key   = "user_order_approved" if status == "approved" else "user_order_rejected"
+    order = db.get_order(oid)
+    if order:
         try:
-            await bot.send_message(user_id, t(user_lang, msg_key), parse_mode="HTML")
-        except Exception as exc:
-            logger.error("Failed to notify user %s about order status: %s", user_id, exc)
+            await bot.send_message(order["user_id"],
+                f"✅ <b>Buyurtmangiz tasdiqlandi!</b>\n\n"
+                f"📦 Buyurtma: <b>#{oid}</b>\n💰 Narx: <b>{price}</b>\n⏰ Muddat: <b>{deadline}</b>\n\n"
+                f"💳 <b>To'lov:</b>\n<code>{PAYMENT_CARD}</code>\n<b>{PAYMENT_CARD_OWNER}</b>\n\n"
+                f"To'lovdan keyin chek rasmini yuboring 👇",
+                reply_markup=payment_confirm_kb(oid), parse_mode="HTML")
+        except Exception as e: logger.error("Client notify failed: %s", e)
 
-    if query.message:
-        try:
-            await query.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-    await query.answer("✅ OK")
+
+# ── Admin: Reject / Start work / Done ──────────────────────────────────────
+@router.callback_query(F.data.startswith("ord:reject:"))
+async def cb_reject(query: CallbackQuery, bot: Bot) -> None:
+    if not query.from_user or query.from_user.id != ADMIN_ID: await query.answer(); return
+    oid = int(query.data.split(":")[2])
+    uid = db.update_order_status(oid, "rejected")
+    if uid:
+        try: await bot.send_message(uid, f"❌ Buyurtma #{oid} rad etildi.\n@qaxxarov_98 ga murojaat qiling.", parse_mode="HTML")
+        except: pass
+    try: await query.message.edit_reply_markup(reply_markup=None)
+    except: pass
+    await query.answer("❌ Rad etildi")
+
+@router.callback_query(F.data.startswith("ord:startwork:"))
+async def cb_startwork(query: CallbackQuery, bot: Bot) -> None:
+    if not query.from_user or query.from_user.id != ADMIN_ID: await query.answer(); return
+    oid = int(query.data.split(":")[2])
+    uid = db.update_order_status(oid, "in_progress")
+    if uid:
+        order = db.get_order(oid)
+        dl = order.get("deadline", "—") if order else "—"
+        try: await bot.send_message(uid, f"🔄 <b>Buyurtma #{oid} — ish boshlandi!</b>\n⏰ Muddat: <b>{dl}</b>\n\n📦 «Zakazlarim» dan kuzating.", parse_mode="HTML")
+        except: pass
+    try: await query.message.edit_reply_markup(reply_markup=None)
+    except: pass
+    await query.answer("🔄 Boshlandi")
+
+@router.callback_query(F.data.startswith("ord:done:"))
+async def cb_done(query: CallbackQuery, bot: Bot) -> None:
+    if not query.from_user or query.from_user.id != ADMIN_ID: await query.answer(); return
+    oid = int(query.data.split(":")[2])
+    uid = db.update_order_status(oid, "done")
+    if uid:
+        try: await bot.send_message(uid, f"🎉 <b>Buyurtma #{oid} tayyor!</b>\nAdmin tez orada tayyor ishni yuboradi. 🚀", parse_mode="HTML")
+        except: pass
+    try: await query.message.edit_reply_markup(reply_markup=None)
+    except: pass
+    await query.answer("✅ Tayyor!")
+
+
+# ── Client: Start payment ─────────────────────────────────────────────────
+@router.callback_query(F.data.startswith("pay:start:"))
+async def cb_pay_start(query: CallbackQuery, state: FSMContext) -> None:
+    if not query.from_user: return
+    oid = int(query.data.split(":")[2])
+    order = db.get_order(oid)
+    if not order: await query.answer("Topilmadi"); return
+    pid = db.create_payment(oid, query.from_user.id, order.get("agreed_price") or "—")
+    await state.update_data(payment_id=pid, order_id=oid)
+    await state.set_state("waiting_receipt")
+    try: await query.message.edit_reply_markup(reply_markup=None)
+    except: pass
+    await query.message.answer(f"📸 Buyurtma <b>#{oid}</b> uchun to'lov chekini <b>rasm</b> sifatida yuboring:", parse_mode="HTML")
+    await query.answer()
